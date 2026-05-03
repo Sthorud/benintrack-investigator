@@ -30,7 +30,7 @@ def run_sherlock_search(username: str):
         # Appel compatible v0.14.3
         results_raw = sherlock(
             username=username,
-            site_list=TARGET_SITES, # Cet argument existe en 0.14.3
+            site_list=TARGET_SITES, 
             timeout=60,
             tor=False,
             unique_tor=False
@@ -39,7 +39,8 @@ def run_sherlock_search(username: str):
         found_profiles = []
         if isinstance(results_raw, dict):
             for site_name, result_data in results_raw.items():
-                if isinstance(result_data, dict) and "status" in result_
+                # CORRECTION ICI : ajout de 'data' après 'result_'
+                if isinstance(result_data, dict) and "status" in result_data:
                     if result_data["status"].is_found():
                         found_profiles.append({
                             "platform": site_name,
