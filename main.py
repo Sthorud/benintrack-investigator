@@ -8,7 +8,7 @@ import logging
 import sys
 import os
 
-logging.basicConfig(level=logging.DEBUG) # On passe en DEBUG pour tout voir
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BeninTrack Investigator API")
@@ -21,21 +21,40 @@ TARGET_SITES = [
 class SearchRequest(BaseModel):
     username: str
 
+def get_sherlock_path():
+    """
+    Trouve le chemin absolu de l'exécutable sherlock dans le venv de Render.
+    Sur Render, le venv est souvent dans /opt/render/project/src/.venv/bin/
+    """
+    # Chemin standard sur Render
+    base_path = "/opt/render/project/src/.venv/bin/sherlock"
+    if os.path.exists(base_path):
+        return base_path
+    
+    # Fallback: essayer de le trouver via which (si disponible)
+    try:
+        result = subprocess.run(["which", "sherlock"], capture_output=True, text=True)
+        if result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+        
+    return "sherlock" # Dernier recours: espérer qu'il soit dans le PATH global
+
+SHERLOCK_CMD = get_sherlock_path()
+logger.info(f"Chemin Sherlock détecté : {SHERLOCK_CMD}")
+
 def run_sherlock_cli(username: str):
-    """
-    Lance Sherlock via python -m sherlock_project pour garantir l'exécution
-    dans l'environnement virtuel de Render.
-    """
     try:
         logger.info(f"Démarrage recherche CLI pour : {username}")
         
-        # Utilisation de python -m pour être sûr d'utiliser la version installée dans le venv
+        # On utilise l'exécutable direct trouvé plus haut
         cmd = [
-            sys.executable, "-m", "sherlock_project.sherlock",
+            SHERLOCK_CMD,
             username,
             "--timeout", "60",
             "--json",
-            "--print-found" # On ne veut que les trouvés pour réduire le bruit
+            "--print-found"
         ]
         
         logger.debug(f"Commande lancée : {' '.join(cmd)}")
@@ -44,19 +63,14 @@ def run_sherlock_cli(username: str):
             cmd, 
             capture_output=True, 
             text=True, 
-            timeout=90 # On augmente le timeout global
+            timeout=90
         )
         
-        # Loguer la sortie brute pour débogage si ça échoue
         if result.stdout:
-            logger.debug(f"STDOUT: {result.stdout[:500]}...") # Les premiers 500 chars
+            logger.debug(f"STDOUT brut: {result.stdout[:200]}...")
         if result.stderr:
             logger.error(f"STDERR: {result.stderr}")
 
-        if result.returncode != 0:
-            logger.warning(f"Sherlock a retourné un code d'erreur: {result.returncode}")
-            # Parfois Sherlock retourne 1 même s'il a trouvé des choses, on continue quand même
-            
         output = result.stdout.strip()
         if not output:
             logger.info("Sortie vide de Sherlock.")
@@ -68,25 +82,20 @@ def run_sherlock_cli(username: str):
         for line in lines:
             line = line.strip()
             if not line or not line.startswith('{'):
-                continue # Ignorer les lignes qui ne sont pas du JSON
+                continue 
             
             try:
                 data = json.loads(line)
                 site_name = data.get("site", "")
                 
-                # Vérification basique : si le site est dans notre liste OU si on veut tout voir
-                # Pour l'instant, on filtre strictement
                 if site_name in TARGET_SITES:
                     found_profiles.append({
                         "platform": site_name,
                         "url": data.get("url", ""),
                         "http_status": data.get("http_status", 0)
                     })
-                else:
-                    logger.debug(f"Site ignoré (hors cible): {site_name}")
                     
-            except json.JSONDecodeError as e:
-                logger.debug(f"Ligne JSON invalide ignorée: {line[:50]}")
+            except json.JSONDecodeError:
                 continue
 
         logger.info(f"Recherche terminée. {len(found_profiles)} profils trouvés.")
@@ -95,6 +104,9 @@ def run_sherlock_cli(username: str):
     except subprocess.TimeoutExpired:
         logger.warning("Timeout du processus Sherlock.")
         return []
+    except FileNotFoundError:
+        logger.error(f"L'exécutable Sherlock n'a pas été trouvé à : {SHERLOCK_CMD}")
+        raise HTTPException(status_code=500, detail="Sherlock non installé correctement")
     except Exception as e:
         logger.error(f"Exception critique: {str(e)}", exc_info=True)
         raise e
