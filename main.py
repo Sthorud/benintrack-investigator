@@ -7,12 +7,13 @@ import concurrent.futures
 import logging
 import os
 
+# Configuration des logs pour voir ce qui se passe sur Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BeninTrack Investigator API")
 
-# Liste ciblée
+# Liste ciblée pour les professionnels béninois (Vitesse + Pertinence)
 TARGET_SITES = [
     "Facebook", "LinkedIn", "Twitter", "Instagram", 
     "GitHub", "TikTok", "Pinterest", "YouTube"
@@ -23,86 +24,88 @@ class SearchRequest(BaseModel):
 
 def run_sherlock_cli(username: str):
     """
-    Lance Sherlock via la ligne de commande et parse le résultat JSON
+    Lance Sherlock via la ligne de commande et parse le résultat JSON/NDJSON.
+    Cette méthode est plus stable que l'import direct du module Python sur certains serveurs.
     """
     try:
-        logger.info(f"Lancement CLI Sherlock pour : {username}")
+        logger.info(f"Démarrage CLI Sherlock pour : {username}")
         
         # Construction de la commande
-        # --json produit une sortie facile à parser
+        # --json : Sortie en format JSON
+        # --timeout : Temps max par site
         cmd = [
             "sherlock", 
             username, 
             "--timeout", "60",
-            "--print-found", # Affiche seulement les trouvés
-            "--json"         # Sortie en JSON
+            "--json"
         ]
         
-        # Ajout des sites ciblés si on veut limiter (optionnel, sinon il cherche partout)
-        # Pour la vitesse, on laisse chercher partout et on filtre après, 
-        # ou on ajoute --site Facebook --site Twitter etc. si la version CLI le supporte bien.
-        # Ici, on utilise --print-found pour avoir uniquement les résultats positifs.
-        
+        # Exécution de la commande
         result = subprocess.run(
             cmd, 
             capture_output=True, 
             text=True, 
-            timeout=70
+            timeout=70 # Timeout global un peu plus large que le timeout par site
         )
         
         if result.returncode != 0:
             logger.error(f"Erreur CLI Sherlock: {result.stderr}")
             return []
             
-        # Parse le JSON retourné par Sherlock
-        # Attention: Sherlock peut retourner plusieurs objets JSON ou un tableau selon la version
         output = result.stdout.strip()
         if not output:
+            logger.info("Aucune sortie de la part de Sherlock.")
             return []
             
         found_profiles = []
-        try:
-            # Sherlock retourne souvent une liste d'objets JSON quand --json est utilisé
-            data = json.loads(output)
+        
+        # Sherlock retourne souvent du NDJSON (Newline Delimited JSON)
+        # C'est-à-dire un objet JSON par ligne, pas un tableau global.
+        lines = output.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
             
-            # Si c'est une liste
-            if isinstance(data, list):
-                for item in data:
-                    site_name = item.get("site", "")
-                    # Filtrer sur nos sites ciblés
-                    if site_name in TARGET_SITES:
-                        found_profiles.append({
-                            "platform": site_name,
-                            "url": item.get("url", ""),
-                            "http_status": item.get("http_status", 0)
-                        })
-            # Si c'est un dict unique (cas rare)
-            elif isinstance(data, dict):
-                 site_name = data.get("site", "")
-                 if site_name in TARGET_SITES:
+            try:
+                data = json.loads(line)
+                
+                # Extraction des données pertinentes
+                site_name = data.get("site", "")
+                
+                # On ne garde que les sites qui nous intéressent
+                if site_name in TARGET_SITES:
                     found_profiles.append({
                         "platform": site_name,
                         "url": data.get("url", ""),
                         "http_status": data.get("http_status", 0)
                     })
                     
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de parsing JSON: {str(e)} - Output: {output[:200]}")
-            return []
+            except json.JSONDecodeError:
+                # Si une ligne n'est pas du JSON valide, on l'ignore
+                continue
 
-        logger.info(f"CLI terminé. {len(found_profiles)} profils trouvés.")
+        logger.info(f"Recherche terminée. {len(found_profiles)} profils trouvés sur les sites ciblés.")
         return found_profiles
         
+    except subprocess.TimeoutExpired:
+        logger.warning("Le processus Sherlock a mis trop de temps.")
+        return []
     except Exception as e:
-        logger.error(f"Exception critique: {str(e)}")
+        logger.error(f"Exception critique lors de l'exécution CLI: {str(e)}")
         raise e
 
 @app.post("/investigate")
 async def investigate_user(request: SearchRequest):
+    """
+    Endpoint principal pour lancer l'investigation.
+    """
     if not request.username or len(request.username) < 3:
-        raise HTTPException(status_code=400, detail="Nom trop court")
+        raise HTTPException(status_code=400, detail="Nom d'utilisateur trop court (min 3 caractères)")
         
     try:
+        # On utilise un ThreadPoolExecutor car subprocess.run est bloquant
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as pool:
             results = await loop.run_in_executor(pool, run_sherlock_cli, request.username)
@@ -113,8 +116,12 @@ async def investigate_user(request: SearchRequest):
             "count": len(results)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
+        logger.error(f"Erreur non gérée dans l'endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur interne du serveur: {str(e)}")
 
 @app.get("/")
 def read_root():
+    """
+    Endpoint de santé pour vérifier que l'API tourne.
+    """
     return {"status": "API BeninTrack Investigator is running"}
