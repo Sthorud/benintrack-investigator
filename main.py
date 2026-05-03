@@ -5,8 +5,8 @@ import json
 import asyncio
 import concurrent.futures
 import logging
-import sys
 import os
+import tempfile
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -22,91 +22,84 @@ class SearchRequest(BaseModel):
     username: str
 
 def get_sherlock_path():
-    """
-    Trouve le chemin absolu de l'exécutable sherlock dans le venv de Render.
-    Sur Render, le venv est souvent dans /opt/render/project/src/.venv/bin/
-    """
-    # Chemin standard sur Render
     base_path = "/opt/render/project/src/.venv/bin/sherlock"
     if os.path.exists(base_path):
         return base_path
-    
-    # Fallback: essayer de le trouver via which (si disponible)
-    try:
-        result = subprocess.run(["which", "sherlock"], capture_output=True, text=True)
-        if result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-        
-    return "sherlock" # Dernier recours: espérer qu'il soit dans le PATH global
+    return "sherlock"
 
 SHERLOCK_CMD = get_sherlock_path()
-logger.info(f"Chemin Sherlock détecté : {SHERLOCK_CMD}")
 
 def run_sherlock_cli(username: str):
     try:
         logger.info(f"Démarrage recherche CLI pour : {username}")
         
-        # On utilise l'exécutable direct trouvé plus haut
-        cmd = [
-            SHERLOCK_CMD,
-            username,
-            "--timeout", "60",
-            "--json",
-            "--print-found"
-        ]
-        
-        logger.debug(f"Commande lancée : {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            timeout=90
-        )
-        
-        if result.stdout:
-            logger.debug(f"STDOUT brut: {result.stdout[:200]}...")
-        if result.stderr:
-            logger.error(f"STDERR: {result.stderr}")
+        # Création d'un fichier temporaire pour recevoir le JSON
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp_file:
+            tmp_filename = tmp_file.name
 
-        output = result.stdout.strip()
-        if not output:
-            logger.info("Sortie vide de Sherlock.")
-            return []
+        try:
+            # Commande corrigée : --json prend maintenant le nom du fichier en argument
+            cmd = [
+                SHERLOCK_CMD,
+                username,
+                "--timeout", "60",
+                "--json", tmp_filename, # On donne le fichier ici
+                "--print-found"
+            ]
             
-        found_profiles = []
-        lines = output.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if not line or not line.startswith('{'):
-                continue 
+            logger.debug(f"Commande lancée : {' '.join(cmd)}")
             
-            try:
-                data = json.loads(line)
-                site_name = data.get("site", "")
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=90
+            )
+            
+            if result.stderr:
+                logger.error(f"STDERR: {result.stderr}")
+
+            # Lecture du fichier JSON généré
+            if not os.path.exists(tmp_filename) or os.path.getsize(tmp_filename) == 0:
+                logger.info("Fichier JSON vide ou inexistant.")
+                return []
+
+            with open(tmp_filename, 'r') as f:
+                content = f.read().strip()
                 
-                if site_name in TARGET_SITES:
-                    found_profiles.append({
-                        "platform": site_name,
-                        "url": data.get("url", ""),
-                        "http_status": data.get("http_status", 0)
-                    })
-                    
-            except json.JSONDecodeError:
-                continue
+            if not content:
+                return []
 
-        logger.info(f"Recherche terminée. {len(found_profiles)} profils trouvés.")
-        return found_profiles
-        
+            found_profiles = []
+            # Le fichier peut contenir plusieurs objets JSON ou un tableau
+            # On essaie de parser ligne par ligne (NDJSON) ou comme un tableau
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                try:
+                    data = json.loads(line)
+                    site_name = data.get("site", "")
+                    if site_name in TARGET_SITES:
+                        found_profiles.append({
+                            "platform": site_name,
+                            "url": data.get("url", ""),
+                            "http_status": data.get("http_status", 0)
+                        })
+                except json.JSONDecodeError:
+                    continue
+            
+            logger.info(f"Recherche terminée. {len(found_profiles)} profils trouvés.")
+            return found_profiles
+
+        finally:
+            # Nettoyage du fichier temporaire
+            if os.path.exists(tmp_filename):
+                os.remove(tmp_filename)
+                
     except subprocess.TimeoutExpired:
         logger.warning("Timeout du processus Sherlock.")
         return []
-    except FileNotFoundError:
-        logger.error(f"L'exécutable Sherlock n'a pas été trouvé à : {SHERLOCK_CMD}")
-        raise HTTPException(status_code=500, detail="Sherlock non installé correctement")
     except Exception as e:
         logger.error(f"Exception critique: {str(e)}", exc_info=True)
         raise e
