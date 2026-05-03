@@ -22,32 +22,30 @@ class SearchRequest(BaseModel):
 def run_sherlock_search(username: str):
     """
     Fonction isolée pour lancer Sherlock sans bloquer l'API
+    Compatible avec sherlock-project 0.14.3
     """
     try:
         logger.info(f"Démarrage de la recherche pour : {username}")
         
-        # Dans la version 0.15+, on appelle sherlock sans site_list
-        # Il cherche partout, puis on filtre nous-mêmes les résultats
+        # Appel compatible v0.14.3
         results_raw = sherlock(
             username=username,
+            site_list=TARGET_SITES, # Cet argument existe en 0.14.3
             timeout=60,
             tor=False,
             unique_tor=False
-            # On retire site_list car il n'est plus accepté ainsi
         )
         
         found_profiles = []
         if isinstance(results_raw, dict):
             for site_name, result_data in results_raw.items():
-                # On ne garde que les sites qui sont dans notre liste blanche
-                if site_name in TARGET_SITES:
-                    if isinstance(result_data, dict) and "status" in result_data:
-                        if result_data["status"].is_found():
-                            found_profiles.append({
-                                "platform": site_name,
-                                "url": result_data.get("url", ""),
-                                "http_status": result_data.get("http_status", 0)
-                            })
+                if isinstance(result_data, dict) and "status" in result_
+                    if result_data["status"].is_found():
+                        found_profiles.append({
+                            "platform": site_name,
+                            "url": result_data.get("url", ""),
+                            "http_status": result_data.get("http_status", 0)
+                        })
         else:
             logger.warning(f"Format de retour inattendu de Sherlock: {type(results_raw)}")
             
